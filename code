@@ -1,0 +1,117 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+# Load datasets with error handling for bad lines
+calls_df = pd.read_csv("calls.csv", quoting=3, escapechar='\\', on_bad_lines='skip')
+customers_df = pd.read_csv("customers.csv", quoting=3, escapechar='\\')
+reason_df = pd.read_csv("reason.csv", quoting=3, escapechar='\\')
+sentiment_df = pd.read_csv("sentiment_statistics.csv", quoting=3, escapechar='\\')
+test_df = pd.read_csv("test.csv", quoting=3, escapechar='\\')
+
+# 1. Data Cleaning and Preprocessing
+# Handle missing values for 'mp_status' if it exists
+if 'mp_status' in calls_df.columns:
+    calls_df['mp_status'].fillna(0, inplace=True)
+
+# Convert datetime columns to proper datetime format
+for col in ['call_start_datetime', 'call_end_datetime', 'agent_assigned_datetime']:
+    calls_df[col] = pd.to_datetime(calls_df[col], errors='coerce')
+
+# 2. Feature Engineering: Calculate AHT and AST
+calls_df['handle_time'] = (calls_df['call_end_datetime'] - calls_df['agent_assigned_datetime']).dt.total_seconds()
+calls_df['speed_to_answer'] = (calls_df['agent_assigned_datetime'] - calls_df['call_start_datetime']).dt.total_seconds()
+
+# Merging customer details for further analysis
+merged_df = pd.merge(calls_df, customers_df, on='customer_id', how='left')
+
+# 3. Exploratory Data Analysis (EDA)
+# Distribution of AHT
+plt.figure(figsize=(12, 5))
+sns.histplot(calls_df['handle_time'], kde=True, bins=30, color='blue').set_title("Distribution of AHT (Handle Time)")
+plt.xlabel('AHT (Seconds)')
+plt.show()
+
+# Distribution of AST
+plt.figure(figsize=(12, 5))
+sns.histplot(calls_df['speed_to_answer'], kde=True, bins=30, color='green').set_title("Distribution of AST (Speed to Answer)")
+plt.xlabel('AST (Seconds)')
+plt.show()
+
+# 4. Analysis of Factors Driving Long AHT and AST
+# Correlation heatmap
+corr = calls_df[['handle_time', 'speed_to_answer', 'silence_percent_average', 'average_sentiment']].corr()
+plt.figure(figsize=(8, 6))
+sns.heatmap(corr, annot=True, cmap="coolwarm", square=True).set_title('Correlation Heatmap')
+plt.show()
+
+# Agent Performance Analysis
+agent_performance = calls_df.groupby('agent_id')['handle_time'].mean().reset_index().sort_values('handle_time', ascending=False)
+plt.figure(figsize=(12, 5))
+sns.barplot(data=agent_performance.head(10), x='agent_id', y='handle_time').set_title('Top 10 Agents with Longest AHT')
+plt.show()
+
+# 5. NLP Analysis for Call Transcripts
+nltk.download('stopwords')
+nltk.download('punkt')
+
+# Clean and tokenize transcripts
+stop_words = set(stopwords.words('english'))
+
+def clean_transcript(text):
+    words = word_tokenize(text.lower())
+    return ' '.join([word for word in words if word.isalnum() and word not in stop_words])
+
+calls_df['cleaned_transcript'] = calls_df['call_transcript'].apply(lambda x: clean_transcript(x))
+
+# TF-IDF Vectorization
+tfidf_vectorizer = TfidfVectorizer(max_features=1000)
+X_transcripts = tfidf_vectorizer.fit_transform(calls_df['cleaned_transcript'])
+
+# 6. IVR Improvement Suggestions
+frequent_reasons = calls_df['primary_call_reason'].value_counts().reset_index().rename(columns={'index': 'call_reason', 'primary_call_reason': 'count'})
+plt.figure(figsize=(10, 6))
+frequent_reasons.plot(kind='barh', x='call_reason', y='count', title='Most Frequent Call Reasons')
+plt.show()
+
+# 7. Predicting Primary Call Reasons for Test Data
+train_data = merged_df[['handle_time', 'speed_to_answer', 'average_sentiment', 'silence_percent_average']]
+train_labels = merged_df['primary_call_reason']
+
+# Encode categorical labels
+label_encoder = LabelEncoder()
+train_labels_encoded = label_encoder.fit_transform(train_labels)
+
+# Split the data
+X_train, X_test, y_train, y_test = train_test_split(train_data, train_labels_encoded, test_size=0.2, random_state=42)
+
+# Train RandomForest Classifier
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+rf_model.fit(X_train, y_train)
+
+# Predict and Evaluate
+y_pred = rf_model.predict(X_test)
+print(classification_report(y_test, y_pred, target_names=label_encoder.classes_))
+
+# Apply the model on test data
+test_data = test_df[['handle_time', 'speed_to_answer', 'average_sentiment', 'silence_percent_average']]
+test_predictions = rf_model.predict(test_data)
+test_df['primary_call_reason'] = label_encoder.inverse_transform(test_predictions)
+
+# Save predictions to CSV
+test_df[['call_id', 'primary_call_reason']].to_csv('test_predictions.csv', index=False)
+
+# 8. Recommendations
+# Key Recommendations:
+# 1. Reduce silence during calls to lower AHT.
+# 2. Automate frequent simple queries through an improved IVR system.
+# 3. Optimize agent performance by further training low-performing agents.
